@@ -10,6 +10,7 @@ import { formatHermesPrompt, parseHermesResult } from "./resultContract.mjs";
 import { createInitialState } from "./schema.mjs";
 import { acquireMissionLock } from "./stateStore.mjs";
 import { routeTask } from "./routing/empiricalRouter.mjs";
+import { createAttemptIdentity } from "./routing/shadowAdvisory.mjs";
 
 const TERMINAL = new Set(["WAITING_APPROVAL", "BLOCKED", "COMPLETE", "FAILED"]);
 const UNCERTAIN = new Set(["RUNNING", "VERIFYING"]);
@@ -71,6 +72,7 @@ function laneFromTask(task) {
     forbidden_paths: [...(task.forbidden_paths ?? [])],
     forbidden_actions: [...(task.forbidden_actions ?? [])],
     task_type: task.task_type ?? "unknown",
+    cost_or_escalation_band: task.cost_or_escalation_band ?? task.escalation_band ?? null,
     required_tools: [...(task.required_tools ?? [])],
     required_context_ids: [...(task.required_context_ids ?? [])],
     tool_profile: task.tool_profile ?? null,
@@ -79,7 +81,10 @@ function laneFromTask(task) {
     routing_observation_recorded: false,
     status: "PENDING",
     attempt_id: null,
+    request_id: null,
     correlation_id: null,
+    shadow_task_id: null,
+    shadow_advisory_attempt_id: null,
     attempt_count: 0,
     execution_retry_count: 0,
     drift_correction_count: 0,
@@ -220,18 +225,12 @@ export class SupervisorScheduler {
   async prepareRoute(state, lane) {
     if (!this.routing?.enabled || lane.route_decision) return;
     const statistics = await this.routing.store.stats();
-    const laya = await this.routing.laya.rankExecutors({
-      task_type: lane.task_type,
-      description: lane.description,
-      candidates: this.routing.candidates.map((item) => item.executor),
-    });
     state.metrics.routing_decisions = (state.metrics.routing_decisions ?? 0) + 1;
     lane.route_started_at = new Date().toISOString();
     lane.route_decision = routeTask({
       task_type: lane.task_type,
       candidates: this.routing.candidates,
       statistics,
-      laya,
       permission_decision: "AUTO_CONTINUE",
       conservative_fallback: this.routing.conservative_fallback,
       required_tools: lane.required_tools,
@@ -250,15 +249,90 @@ export class SupervisorScheduler {
     });
   }
 
+  enqueueShadowAdvisory(lane) {
+    try {
+      const dispatcher = this.routing?.shadowDispatcher;
+      if (
+        !dispatcher ||
+        !lane.shadow_task_id ||
+        !lane.attempt_id ||
+        !lane.route_decision ||
+        !lane.request_id ||
+        !lane.correlation_id
+      )
+        return;
+      const policyCandidateIds = new Set(
+        (lane.route_decision.scored_candidates ?? []).map((candidate) => candidate.executor)
+      );
+      const candidates = this.routing.candidates
+        .filter((candidate) => policyCandidateIds.has(candidate.executor))
+        .map((candidate) => ({
+          id: candidate.executor,
+          model: candidate.model ?? null,
+          provider: candidate.provider ?? null,
+          tier: candidate.tier ?? null,
+          cost_band: candidate.cost_band ?? null,
+          estimated_cost: candidate.estimated_cost ?? null,
+        }));
+      const selected = candidates.find(
+        (candidate) => candidate.id === lane.route_decision.selected.executor
+      );
+      if (!selected) return;
+      const premiumSelection =
+        /premium|high|escalat/i.test(`${selected.tier ?? ""} ${selected.cost_band ?? ""}`) ||
+        (selected.estimated_cost ?? 0) > 0;
+      const band = lane.cost_or_escalation_band
+        ? String(lane.cost_or_escalation_band)
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-|-$/g, "")
+            .slice(0, 60)
+        : premiumSelection
+          ? "premium-escalation"
+          : "standard";
+      const accepted = dispatcher.enqueue(
+        {
+          task_id: lane.shadow_task_id,
+          attempt_id: lane.attempt_id,
+          request_id: lane.request_id,
+          correlation_id: lane.correlation_id,
+          task_type: lane.task_type,
+          candidates,
+          metadata: {
+            bounded_redacted_description: lane.description,
+            required_tool_ids: lane.required_tools,
+            cost_or_escalation_band: band,
+          },
+          schema_version: 1,
+        },
+        {
+          authoritative_route: lane.route_decision.selected.executor,
+          actual_executor: null,
+          actual_model: null,
+          actual_provider: null,
+          retries: Math.max(0, lane.attempt_count - 1),
+          final_success: null,
+          outcome_state: "pending",
+          agreement: "unknown",
+          counterfactual_quality: "UNKNOWN",
+        }
+      );
+      if (accepted) lane.shadow_advisory_attempt_id = lane.attempt_id;
+    } catch {
+      // Shadow telemetry is best effort and must not affect task execution.
+    }
+  }
+
   async recordRoutingOutcome(lane, decision) {
+    this.recordShadowOutcome(lane, decision);
     if (!this.routing?.enabled || !lane.route_decision || lane.routing_observation_recorded) return;
-    if (!TERMINAL.has(decision)) return;
+    if (!TERMINAL.has(decision) || decision === "WAITING_APPROVAL") return;
     const completedAt = new Date();
     const startedAt = new Date(lane.route_started_at ?? lane.updated_at ?? lane.created_at);
     const verifierStatuses = lane.verifier_results.map((item) => item.status);
     await this.routing.store.append({
       task_id: lane.task_id,
-      correlation_id: lane.correlation_id ?? lane.attempt_id ?? lane.task_id,
+      correlation_id: lane.correlation_id,
       task_type: lane.task_type,
       executor: lane.route_decision.selected.executor,
       model: lane.route_decision.selected.model ?? null,
@@ -288,6 +362,35 @@ export class SupervisorScheduler {
       tool_profile: lane.tool_profile,
     });
     lane.routing_observation_recorded = true;
+  }
+
+  recordShadowOutcome(lane, decision) {
+    const dispatcher = this.routing?.shadowDispatcher;
+    if (!dispatcher || lane.shadow_advisory_attempt_id !== lane.attempt_id || !lane.attempt_id)
+      return;
+    const outcomeState =
+      decision === "COMPLETE"
+        ? "success"
+        : decision === "FAILED"
+          ? "failure"
+          : decision === "WAITING_APPROVAL"
+            ? "waiting_approval"
+            : decision === "CANCELLED"
+              ? "cancelled"
+              : "unknown";
+    try {
+      dispatcher.updateRecord({
+        task_id: lane.shadow_task_id,
+        attempt_id: lane.attempt_id,
+        retries: Math.max(0, lane.attempt_count - 1),
+        outcome_state: outcomeState,
+        final_success: ["success", "failure", "cancelled"].includes(outcomeState)
+          ? outcomeState === "success"
+          : null,
+      });
+    } catch {
+      // Shadow telemetry is best effort and cannot affect task completion.
+    }
   }
 
   updateDependencies(state) {
@@ -363,8 +466,20 @@ export class SupervisorScheduler {
     while (lane.attempt_count < lane.max_attempts) {
       lane.attempt_count += 1;
       if (lane.attempt_count > 1) state.metrics.retries += 1;
-      lane.attempt_id = `attempt-${randomUUID()}`;
-      lane.correlation_id = lane.attempt_id;
+      try {
+        const identity = createAttemptIdentity(lane.task_id);
+        lane.shadow_task_id = identity.task_id;
+        lane.attempt_id = identity.attempt_id;
+        lane.request_id = identity.request_id;
+        lane.correlation_id = identity.correlation_id;
+      } catch {
+        // Unsupported logical IDs disable only the optional shadow join.
+        lane.shadow_task_id = null;
+        lane.attempt_id = randomUUID();
+        lane.request_id = randomUUID();
+        lane.correlation_id = lane.request_id;
+      }
+      lane.shadow_advisory_attempt_id = null;
       let lease;
       try {
         lease = await this.lockManager.acquire(lane.resources, {
@@ -377,7 +492,9 @@ export class SupervisorScheduler {
         if (/resource conflict/i.test(error.message)) {
           lane.attempt_count -= 1;
           lane.attempt_id = null;
+          lane.request_id = null;
           lane.correlation_id = null;
+          lane.shadow_task_id = null;
           return "LOCK_CONFLICT";
         }
         lane.status = "BLOCKED";
@@ -389,15 +506,18 @@ export class SupervisorScheduler {
         lane.updated_at = new Date().toISOString();
         state.metrics.dispatch_count += 1;
         await this.save(state);
+        this.enqueueShadowAdvisory(lane);
         const adapter = this.adapterFactory(lane, lane.route_decision?.selected ?? null);
         let raw;
         try {
           const handle = await adapter.send_task({
             prompt: formatHermesPrompt(promptState(this.missionId, lane)),
             description: lane.description,
-            task_id: lane.task_id,
+            task_id: lane.shadow_task_id ?? lane.task_id,
             attempt_id: lane.attempt_id,
+            request_id: lane.request_id,
             correlation_id: lane.correlation_id,
+            mission_id: this.missionId,
             mutating: lane.mutating,
             permission_decision: "AUTO_CONTINUE",
           });
@@ -413,9 +533,11 @@ export class SupervisorScheduler {
           if (lane.attempt_count >= lane.max_attempts) {
             lane.status = "BLOCKED";
             lane.blocker = "Maximum autonomous attempts reached after adapter failure";
+            this.recordShadowOutcome(lane, "BLOCKED");
             await this.audit(lane, lane.status);
             return;
           }
+          this.recordShadowOutcome(lane, "UNKNOWN");
           continue;
         }
         lane.status = "VERIFYING";
@@ -427,9 +549,11 @@ export class SupervisorScheduler {
           if (lane.attempt_count >= lane.max_attempts) {
             lane.status = "BLOCKED";
             lane.blocker = "Maximum autonomous attempts reached after contract failure";
+            this.recordShadowOutcome(lane, "BLOCKED");
             await this.audit(lane, lane.status);
             return;
           }
+          this.recordShadowOutcome(lane, "UNKNOWN");
           continue;
         }
         lane.latest_result = result;
@@ -465,9 +589,11 @@ export class SupervisorScheduler {
         if (lane.attempt_count >= lane.max_attempts) {
           lane.status = "BLOCKED";
           lane.blocker = "Maximum autonomous attempts reached";
+          this.recordShadowOutcome(lane, decision.action === "CORRECT" ? "FAILED" : "BLOCKED");
           await this.audit(lane, lane.status, lane.evidence);
           return;
         }
+        this.recordShadowOutcome(lane, decision.action === "CORRECT" ? "FAILED" : "UNKNOWN");
       } finally {
         await this.lockManager.release(lease);
       }

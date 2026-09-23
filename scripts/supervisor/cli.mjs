@@ -14,8 +14,8 @@ import { ResourceLockManager } from "./resourceLocks.mjs";
 import { SupervisorScheduler } from "./scheduler.mjs";
 import { EvidenceCache } from "./evidenceCache.mjs";
 import { VerifierHarness } from "./verifiers/index.mjs";
-import { FakeLayaAdapter, LocalLayaAdapter, NullLayaAdapter } from "./routing/layaAdapter.mjs";
 import { RoutingObservationStore } from "./routing/observationStore.mjs";
+import { DurableShadowSpool, ShadowAdvisoryDispatcher } from "./routing/shadowAdvisory.mjs";
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
@@ -95,29 +95,26 @@ function dagScheduler(stateRoot, mission, adapterFactory, maxConcurrency) {
 async function routingFrom(options, stateRoot) {
   if (!options.routing_config) return null;
   const config = JSON.parse(await readFile(options.routing_config, "utf8"));
-  let laya;
-  if (!config.laya || config.laya.mode === "null") laya = new NullLayaAdapter();
-  else if (config.laya.mode === "fake") {
-    laya = new FakeLayaAdapter(config.laya.responses ?? {}, {
-      confidenceThreshold: config.laya.confidence_threshold ?? 0.6,
-    });
-  } else if (config.laya.mode === "local") {
-    laya = new LocalLayaAdapter({
-      enabled: config.laya.enabled === true,
-      modelDir: config.laya.model_dir,
-      timeoutMs: config.laya.timeout_ms ?? 1_500,
-      confidenceThreshold: config.laya.confidence_threshold ?? 0.6,
-    });
-  } else throw new Error("Laya mode must be null, fake, or local");
+  const shadowSpool = new DurableShadowSpool(
+    path.join(stateRoot, "empirical-routing", "shadow-spool"),
+    { maxQueue: config.shadow?.max_queue ?? 100, maxResults: config.shadow?.max_results ?? 500 }
+  );
+  const shadowDispatcher = new ShadowAdvisoryDispatcher({
+    enabled: config.shadow?.enabled === true,
+    sampleRate: config.shadow?.sample_rate ?? 0.05,
+    maxQueue: config.shadow?.max_queue ?? 100,
+    transport: shadowSpool,
+  });
   return {
     enabled: true,
     store: new RoutingObservationStore(stateRoot),
-    laya,
     candidates: config.candidates,
     conservative_fallback: config.conservative_fallback,
     minimum_samples: config.minimum_samples ?? 5,
     exploration_interval: config.exploration_interval ?? 10,
     exploration_sequence: config.exploration_sequence ?? 0,
+    shadowDispatcher,
+    shadowSpool,
   };
 }
 

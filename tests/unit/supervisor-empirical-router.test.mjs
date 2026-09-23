@@ -87,12 +87,16 @@ test("acceptance reliability outranks cost and Laya cannot overrule empirical ev
     })
   );
   assert.equal(result.selected.executor, "codex");
-  assert.equal(result.explanation.LAYA_USED, "YES");
+  assert.equal(result.explanation.LAYA_USED, "NO");
 });
 
-test("Laya agreement is recorded but policy remains authoritative", () => {
-  const agreed = routeTask(
+test("empirical routing ignores Laya advice, including scoring ties", () => {
+  const result = routeTask(
     input({
+      statistics: [
+        stat("local", 10, 10, { average_cost: 0, average_latency_ms: 20 }),
+        stat("codex", 10, 10, { average_cost: 0, average_latency_ms: 20 }),
+      ],
       laya: {
         selected: ["local"],
         confidence: 0.9,
@@ -102,13 +106,11 @@ test("Laya agreement is recorded but policy remains authoritative", () => {
       },
     })
   );
-  assert.equal(agreed.selected.executor, "local");
-  assert.equal(agreed.explanation.LAYA_RECOMMENDATION, "local");
-  assert.equal(agreed.explanation.LAYA_MODEL, "local-laya");
-  assert.equal(agreed.explanation.LAYA_LATENCY_MS, 12);
-  assert.equal(agreed.explanation.LAYA_CONFIDENCE, 0.9);
-  assert.equal(agreed.explanation.EMPIRICAL_SELECTION, "local");
-  assert.equal(agreed.explanation.FINAL_SELECTION, "local");
+  assert.equal(result.selected.executor, "codex");
+  assert.equal(result.explanation.LAYA_USED, "NO");
+  assert.equal(result.explanation.LAYA_RECOMMENDATION, null);
+  assert.equal(result.explanation.EMPIRICAL_SELECTION, "codex");
+  assert.equal(result.explanation.FINAL_SELECTION, "codex");
   assert.throws(() => routeTask(input({ permission_decision: "FORBIDDEN" })), /forbidden/i);
   assert.throws(
     () => routeTask(input({ permission_decision: "REQUIRES_USER_APPROVAL" })),

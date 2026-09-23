@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
@@ -202,15 +202,57 @@ export function normalizeHermesTransportResult(output, task) {
 }
 
 function boundedSource(task) {
-  const value = `codex-supervisor:${task.task_id}:${task.correlation_id ?? task.attempt_id}`;
-  if (!/^[A-Za-z0-9:._-]+$/.test(value) || value.length > 240) {
+  const sourcePart = (value) => {
+    const raw = String(value ?? "unlinked");
+    return raw.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(raw)
+      ? raw
+      : createHash("sha256").update(raw).digest("hex");
+  };
+  const value = `codex-supervisor:${sourcePart(task.task_id)}:${sourcePart(task.attempt_id)}:${sourcePart(task.request_id ?? task.correlation_id ?? "unlinked")}`;
+  if (!/^[A-Za-z0-9:._/-]+$/.test(value) || value.length > 600) {
     throw new Error("Hermes task identity contains unsupported characters or is too long");
   }
   return value;
 }
 
-function childEnvironment() {
-  const environment = { ...process.env };
+export function hermesIdentityEnvironment(task, input = process.env) {
+  const environment = { ...input };
+  for (const name of [
+    "JARVIS_OMNIROUTE_CONTRACT_VERSION",
+    "JARVIS_OMNIROUTE_MISSION_ID",
+    "JARVIS_OMNIROUTE_TASK_ID",
+    "JARVIS_OMNIROUTE_ATTEMPT_ID",
+    "JARVIS_OMNIROUTE_REQUEST_ID",
+    "JARVIS_OMNIROUTE_CORRELATION_ID",
+  ])
+    delete environment[name];
+  const identity = {
+    mission: task?.mission_id,
+    task: task?.task_id,
+    attempt: task?.attempt_id,
+    request: task?.request_id,
+    correlation: task?.correlation_id,
+  };
+  const values = Object.values(identity);
+  if (
+    values.every(
+      (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(value)
+    ) &&
+    identity.request === identity.correlation &&
+    identity.correlation !== identity.attempt
+  ) {
+    environment.JARVIS_OMNIROUTE_CONTRACT_VERSION = "2";
+    environment.JARVIS_OMNIROUTE_MISSION_ID = identity.mission;
+    environment.JARVIS_OMNIROUTE_TASK_ID = identity.task;
+    environment.JARVIS_OMNIROUTE_ATTEMPT_ID = identity.attempt;
+    environment.JARVIS_OMNIROUTE_REQUEST_ID = identity.request;
+    environment.JARVIS_OMNIROUTE_CORRELATION_ID = identity.correlation;
+  }
+  return environment;
+}
+
+function childEnvironment(task) {
+  const environment = hermesIdentityEnvironment(task);
   delete environment.NODE_TEST_CONTEXT;
   delete environment.NODE_CHANNEL_FD;
   delete environment.NODE_CHANNEL_SERIALIZATION;
@@ -314,7 +356,7 @@ export class HermesLocalAdapter {
         const child = spawn(this.executable, commandArgs, {
           shell: false,
           stdio: ["ignore", "pipe", "pipe"],
-          env: childEnvironment(),
+          env: childEnvironment(task),
         });
         record.child = child;
         const timeout = setTimeout(() => {

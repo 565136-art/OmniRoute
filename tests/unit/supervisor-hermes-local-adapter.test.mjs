@@ -74,9 +74,11 @@ function task() {
   return {
     prompt: "Return the current hostname and nothing else.",
     description: "Return the current hostname and nothing else.",
+    mission_id: "mission-123",
     task_id: "hostname-task",
     attempt_id: "attempt-123",
-    correlation_id: "attempt-123",
+    request_id: "request-123",
+    correlation_id: "request-123",
     mutating: false,
     permission_decision: "AUTO_CONTINUE",
   };
@@ -107,7 +109,7 @@ test("Hermes local adapter executes a harmless task and propagates task identity
     "--format",
     "stream-json",
     "--source",
-    "codex-supervisor:hostname-task:attempt-123",
+    "codex-supervisor:hostname-task:attempt-123:request-123",
     "--query",
   ]);
   assert.equal(
