@@ -23,6 +23,7 @@ test("external-output ingestion contract (isolated subprocess)", () => {
       "--import",
       "./tests/_setup/mock-inference.mjs",
       "--test",
+      "--test-reporter=tap",
       "tests/fixtures/evals-outputs-ingestion.cases.ts",
     ],
     {
