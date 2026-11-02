@@ -102,7 +102,7 @@ test("runEvalRun envia suiteId e model no body", async () => {
 
   const { runEvalRun } = await import("../../bin/cli/commands/eval.mjs");
   await captureStdout(() =>
-    runEvalRun("suite-001", { model: "gpt-4o", concurrency: 4 }, makeCmd() as any)
+    runEvalRun("suite-001", { model: "gpt-4o" }, makeCmd() as any)
   );
 
   globalThis.fetch = origFetch;

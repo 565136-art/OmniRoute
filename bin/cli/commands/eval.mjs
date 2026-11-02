@@ -249,7 +249,6 @@ export function registerEval(program) {
     .description(t("eval.run.description"))
     .option("-m, --model <id>", t("eval.run.model"), "auto")
     .option("--combo <name>", t("eval.run.combo"))
-    .option("--concurrency <n>", t("eval.run.concurrency"), parseInt, 4)
     .option("--tag <tag>", t("eval.run.tag"))
     .option("--watch", t("eval.run.watch"))
     .action(runEvalRun);
