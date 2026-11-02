@@ -751,8 +751,7 @@
       "description": "Start an eval run for a suite",
       "model": "Model ID to evaluate (default: auto)",
       "combo": "Force a specific combo by name",
-      "tag": "Tag this run for later filtering",
-      "watch": "Watch run progress until completion"
+      "tag": "Tag this run for later filtering"
     },
     "list": {
       "description": "List eval runs",

@@ -748,8 +748,7 @@
       "description": "Iniciar execução de avaliação para uma suite",
       "model": "ID do modelo a avaliar (padrão: auto)",
       "combo": "Forçar combo específico por nome",
-      "tag": "Tag para esta execução",
-      "watch": "Monitorar progresso até conclusão"
+      "tag": "Tag para esta execução"
     },
     "list": {
       "description": "Listar execuções de avaliação",
