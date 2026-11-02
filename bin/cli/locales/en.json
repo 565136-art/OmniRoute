@@ -751,7 +751,6 @@
       "description": "Start an eval run for a suite",
       "model": "Model ID to evaluate (default: auto)",
       "combo": "Force a specific combo by name",
-      "concurrency": "Number of concurrent samples (default: 4)",
       "tag": "Tag this run for later filtering",
       "watch": "Watch run progress until completion"
     },

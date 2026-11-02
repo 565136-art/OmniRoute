@@ -67,7 +67,6 @@ omniroute eval create
 
 - `-m, --model <id>`
 - `--combo <name>`
-- `--concurrency <n>`
 - `--tag <tag>`
 - `--watch`
 
