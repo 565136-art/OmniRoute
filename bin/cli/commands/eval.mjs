@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { setTimeout as sleep } from "node:timers/promises";
 import { apiFetch } from "../api.mjs";
 import { emit } from "../output.mjs";
 import { t } from "../i18n.mjs";
@@ -30,15 +29,28 @@ const suiteSchema = [
 const runSchema = [
   { key: "id", header: "Run ID", width: 22 },
   { key: "suiteId", header: "Suite", width: 18 },
-  { key: "status", header: "Status", width: 12 },
-  { key: "model", header: "Model", width: 25 },
-  { key: "score", header: "Score", formatter: (v) => (v != null ? v.toFixed(3) : "-") },
   {
-    key: "duration",
-    header: "Duration",
-    formatter: (v) => (v != null ? `${(v / 1000).toFixed(1)}s` : "-"),
+    key: "target",
+    header: "Target",
+    width: 25,
+    formatter: (v) => v?.label ?? v?.id ?? (typeof v === "string" ? v : "-"),
   },
-  { key: "startedAt", header: "Started", formatter: fmtTs },
+  {
+    key: "summary",
+    header: "Pass Rate",
+    formatter: (v) =>
+      v?.passRate != null
+        ? `${v.passRate}% (${v.passed ?? 0}/${v.total ?? 0})`
+        : typeof v === "number"
+          ? `${(v * 100).toFixed(1)}%`
+          : "-",
+  },
+  {
+    key: "avgLatencyMs",
+    header: "Latency",
+    formatter: (v) => (v != null ? `${v}ms` : "-"),
+  },
+  { key: "createdAt", header: "Created", formatter: fmtTs },
 ];
 
 const sampleSchema = [
@@ -55,26 +67,6 @@ async function confirm(q) {
     process.stdin.setEncoding("utf8");
     process.stdin.once("data", (c) => resolve(c.toString().trim().toLowerCase().startsWith("y")));
   });
-}
-
-async function watchRun(runId, globalOpts) {
-  let lastStatus = "";
-  while (true) {
-    await sleep(3000);
-    const res = await apiFetch(`/api/evals/${runId}`);
-    if (!res.ok) continue;
-    const r = await res.json();
-    if (r.status !== lastStatus) {
-      const done = r.progress?.completed ?? 0;
-      const total = r.progress?.total ?? "?";
-      process.stderr.write(`[${new Date().toISOString()}] ${r.status} — ${done}/${total}\n`);
-      lastStatus = r.status;
-    }
-    if (["completed", "failed", "cancelled"].includes(r.status)) {
-      emit(r, globalOpts, runSchema);
-      return;
-    }
-  }
 }
 
 function renderScorecard(data) {
@@ -148,22 +140,14 @@ export async function runEvalRun(suiteId, opts, cmd) {
     process.stderr.write(`Error: ${res.status}\n`);
     process.exit(1);
   }
-  const run = await res.json();
-  emit(run, globalOpts, runSchema);
-  if (opts.watch) {
-    if (process.stdout.isTTY) {
-      const { startEvalWatchTui } = await import("../tui/EvalWatch.jsx");
-      await startEvalWatchTui({
-        runId: run.id,
-        suiteId: opts.suite,
-        baseUrl: globalOpts.baseUrl ?? "http://localhost:20128",
-        apiKey: globalOpts.apiKey ?? process.env.OMNIROUTE_API_KEY,
-      });
-    } else {
-      process.stderr.write("\nWatching run... (Ctrl+C to detach)\n");
-      await watchRun(run.id, globalOpts);
-    }
-  }
+  const payload = await res.json();
+  const primaryRun =
+    Array.isArray(payload.runs) && payload.runs.length > 0
+      ? payload.runs.length === 1
+        ? payload.runs[0]
+        : payload.runs
+      : payload;
+  emit(primaryRun, globalOpts, runSchema);
 }
 
 export async function runEvalList(opts, cmd) {
@@ -177,7 +161,7 @@ export async function runEvalList(opts, cmd) {
     process.exit(1);
   }
   const data = await res.json();
-  emit(data.items ?? data, cmd.optsWithGlobals(), runSchema);
+  emit(data.items ?? data.recentRuns ?? data, cmd.optsWithGlobals(), runSchema);
 }
 
 export async function runEvalGet(id, opts, cmd) {
@@ -250,7 +234,6 @@ export function registerEval(program) {
     .option("-m, --model <id>", t("eval.run.model"), "auto")
     .option("--combo <name>", t("eval.run.combo"))
     .option("--tag <tag>", t("eval.run.tag"))
-    .option("--watch", t("eval.run.watch"))
     .action(runEvalRun);
 
   evalCmd

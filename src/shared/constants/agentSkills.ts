@@ -405,7 +405,7 @@ export const CURATED_SKILLS: CuratedSkillEntry[] = [
     id: "cli-eval",
     name: "CLI: Evals",
     description:
-      "Create and run evaluation suites, watch live benchmark progress, view scorecards, compare model performance, and integrate eval runs with CI workflows from the CLI.",
+      "Create and run evaluation suites, view scorecards, compare model performance, and integrate eval runs with CI workflows from the CLI.",
     category: "cli",
     area: "cli-eval",
     icon: "science",

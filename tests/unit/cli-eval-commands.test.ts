@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Command } from "commander";
 
 const SUITE = {
   id: "suite-001",
@@ -12,11 +13,13 @@ const SUITE = {
 const RUN = {
   id: "run-001",
   suiteId: "suite-001",
-  status: "completed",
-  model: "gpt-4o",
-  score: 0.87,
-  duration: 42000,
-  startedAt: "2026-05-14T10:00:00Z",
+  suiteName: "Chat quality",
+  target: { type: "model", id: "gpt-4o", label: "Model: gpt-4o" },
+  summary: { total: 50, valid: 50, invalid: 0, passed: 43, failed: 7, passRate: 86 },
+  avgLatencyMs: 4200,
+  results: [],
+  outputs: {},
+  createdAt: "2026-05-14T10:00:00Z",
 };
 
 const SAMPLES = [
@@ -90,25 +93,49 @@ test("runEvalSuitesGet busca suite por id", async () => {
   assert.equal(parsed.id, "suite-001");
 });
 
-test("runEvalRun envia suiteId e model no body", async () => {
+test("runEvalRun envia suiteId e model no body e extrai primaryRun", async () => {
   let capturedBody: any = null;
   let capturedUrl = "";
   const origFetch = globalThis.fetch;
   globalThis.fetch = ((url: string, opts: any) => {
     capturedUrl = url;
     if (opts?.body) capturedBody = JSON.parse(opts.body);
-    return Promise.resolve(makeResp(RUN));
+    return Promise.resolve(
+      makeResp({
+        suiteId: "suite-001",
+        runGroupId: null,
+        runs: [RUN],
+      })
+    );
   }) as any;
 
-  const { runEvalRun } = await import("../../bin/cli/commands/eval.mjs");
-  await captureStdout(() =>
-    runEvalRun("suite-001", { model: "gpt-4o" }, makeCmd() as any)
-  );
+  try {
+    const { runEvalRun } = await import("../../bin/cli/commands/eval.mjs");
+    const jsonOut = await captureStdout(() =>
+      runEvalRun("suite-001", { model: "gpt-4o" }, makeCmd() as any)
+    );
 
-  globalThis.fetch = origFetch;
-  assert.ok(capturedUrl.includes("/api/evals"));
-  assert.equal(capturedBody.suiteId, "suite-001");
-  assert.deepEqual(capturedBody.target, { type: "model", id: "gpt-4o" });
+    assert.ok(capturedUrl.includes("/api/evals"));
+    assert.equal(capturedBody.suiteId, "suite-001");
+    assert.deepEqual(capturedBody.target, { type: "model", id: "gpt-4o" });
+    const parsed = JSON.parse(jsonOut);
+    assert.equal(parsed.id, "run-001");
+    assert.equal(parsed.suiteId, "suite-001");
+    assert.equal(parsed.target.id, "gpt-4o");
+    assert.equal(parsed.summary.passRate, 86);
+
+    const tableOut = await captureStdout(() =>
+      runEvalRun("suite-001", { model: "gpt-4o" }, { optsWithGlobals: () => ({ output: "table" }) } as any)
+    );
+
+    assert.ok(tableOut.includes("run-001"));
+    assert.ok(tableOut.includes("suite-001"));
+    assert.ok(tableOut.includes("Model: gpt-4o"));
+    assert.ok(tableOut.includes("86% (43/50)"));
+    assert.ok(tableOut.includes("4200ms"));
+  } finally {
+    globalThis.fetch = origFetch;
+  }
 });
 
 test("runEvalList envia filtros na query", async () => {
@@ -215,4 +242,35 @@ test("runEvalScorecard renderiza scorecard em modo table", async () => {
   globalThis.fetch = origFetch;
   assert.ok(out.includes("87.0%") || out.includes("Scorecard"));
   assert.ok(out.includes("43/50") || out.includes("43"));
+});
+
+test("registerEval nao anuncia --watch no help de eval run", async () => {
+  const { registerEval } = await import("../../bin/cli/commands/eval.mjs");
+  const prog = new Command();
+  registerEval(prog);
+
+  const evalCmd = prog.commands.find((c) => c.name() === "eval");
+  assert.ok(evalCmd, "eval command must exist");
+  const runCmd = evalCmd.commands.find((c) => c.name() === "run");
+  assert.ok(runCmd, "eval run command must exist");
+
+  const help = runCmd.helpInformation();
+  assert.equal(help.includes("--watch"), false, "eval run help must not contain --watch");
+});
+
+test("registerEval rejeita --watch como opcao desconhecida", async () => {
+  const { registerEval } = await import("../../bin/cli/commands/eval.mjs");
+  const prog = new Command().exitOverride();
+  prog.configureOutput({ writeErr: () => {} });
+  registerEval(prog);
+
+  assert.throws(
+    () => {
+      prog.parse(["node", "omniroute", "eval", "run", "suite-001", "--watch"]);
+    },
+    (err: any) => {
+      assert.equal(err.code, "commander.unknownOption");
+      return true;
+    }
+  );
 });
