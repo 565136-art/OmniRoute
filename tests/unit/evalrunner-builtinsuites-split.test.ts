@@ -20,6 +20,9 @@ import {
   instructionSuite,
   codexComparisonSuite,
   jarvisCoreSuite,
+  providerRetrySuite,
+  memorySuite,
+  browserToolSuite,
   builtInSuites,
 } from "../../src/lib/evals/evalRunner/builtinSuites.ts";
 
@@ -41,6 +44,9 @@ describe("evalRunner/builtinSuites split-guard", () => {
       instructionSuite,
       codexComparisonSuite,
       jarvisCoreSuite,
+      providerRetrySuite,
+      memorySuite,
+      browserToolSuite,
     ];
     for (const s of named) {
       assert.ok(s, "suite must be defined");
@@ -49,7 +55,7 @@ describe("evalRunner/builtinSuites split-guard", () => {
       assert.ok(Array.isArray(s.cases));
     }
     // Same references, same order — the host relies on this ordering for load-time registration.
-    assert.equal(builtInSuites.length, 8);
+    assert.equal(builtInSuites.length, 11);
     assert.deepEqual(builtInSuites, named);
   });
 
@@ -65,6 +71,9 @@ describe("evalRunner/builtinSuites split-guard", () => {
         ["instruction-following", 5],
         ["codex-comparison", 8],
         ["jarvis-core-v1", 24],
+        ["provider_retry", 10],
+        ["memory", 18],
+        ["browser_tool", 9],
       ]
     );
   });
